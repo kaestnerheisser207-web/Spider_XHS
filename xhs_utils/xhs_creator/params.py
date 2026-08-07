@@ -218,6 +218,7 @@ def generate_request_params(
     include_origin: bool | None = None,
     b1_value: str | None = None,
     dsl_pair_value: str | None = None,
+    proxies: dict | None = None,
 ) -> tuple[dict, dict, str]:
     """Return signed headers, Cookie mapping and compact wire body.
 
@@ -233,7 +234,7 @@ def generate_request_params(
     # cold path with deviceTag=nop.  That path signs the URL MD5 directly and
     # must not activate a generic DS program before the request is emitted.
     if material.device_tag != 'nop':
-        auth.ensure_ds_material()
+        auth.ensure_ds_material(proxies=proxies)
     return generate_profile_request_params(
         auth.profile,
         api,

@@ -156,6 +156,7 @@ class XHS_Creator_Apis:
         mns_profile=None,
         target_origin=None,
         order_wire_headers=True,
+        proxies=None,
     ):
         """按 Creator 4.3.6 浏览器链路生成请求头、Cookie 和线上的紧凑 body。"""
         web_origin = self.auth.origin('web')
@@ -171,6 +172,7 @@ class XHS_Creator_Apis:
             sec_fetch_site=sec_fetch_site,
             # 浏览器 XHR 一律不带 sec-ch-ua*（2026-07-25 实证），仅导航请求保留。
             include_client_hints=False,
+            proxies=self._proxies(proxies),
         )
         target = (target_origin or self.base_url) + api
         wire_cookies = self.auth.cookies_for_url(target, cookies)
@@ -199,6 +201,7 @@ class XHS_Creator_Apis:
                 'GET',
                 referer=CREATOR_NOTE_MANAGER_REFERER,
                 sec_fetch_site='same-origin',
+                proxies=proxies,
             )
             headers['cache-control'] = 'no-cache'
             headers['pragma'] = 'no-cache'
@@ -239,6 +242,7 @@ class XHS_Creator_Apis:
                 data,
                 'POST',
                 target_origin=self.edith_url,
+                proxies=proxies,
             )
             response = self.http.post(
                 self.edith_url + api,
@@ -264,6 +268,7 @@ class XHS_Creator_Apis:
                 data,
                 'POST',
                 target_origin=self.edith_url,
+                proxies=proxies,
             )
             response = self.http.post(
                 self.edith_url + api,
@@ -297,6 +302,7 @@ class XHS_Creator_Apis:
                 sec_fetch_site='same-origin',
                 b1_profile='note_manager',
                 mns_profile='note_manager',
+                proxies=proxies,
             )
             response = self.http.get(
                 self.base_url + splice_api,
@@ -399,6 +405,7 @@ class XHS_Creator_Apis:
                 target_origin=self.edith_url,
                 b1_profile='note_manager',
                 mns_profile='note_manager',
+                proxies=proxies,
             )
             response = self.http.get(
                 self.edith_url + splice_api,
@@ -432,6 +439,7 @@ class XHS_Creator_Apis:
                 '',
                 'GET',
                 target_origin=self.xhs_web_url,
+                proxies=proxies,
             )
             response = self.http.get(
                 self.xhs_web_url + splice_api,
@@ -447,7 +455,8 @@ class XHS_Creator_Apis:
         return success, msg, res_json
 
     def post_note(self, noteInfo, proxies=None):
-        """发布图文或视频笔记；登录和签名参数由 ``self.auth`` 自动提供。"""
+        """发布图文或视频笔记；同一份代理覆盖完整发布调用链。"""
+        proxies = self._proxies(proxies)
         post_api = "/web_api/sns/v2/note"
         title = noteInfo.get('title', '')
         desc = noteInfo.get('desc', '')
@@ -581,6 +590,7 @@ class XHS_Creator_Apis:
             referer=f'{self.base_url}/',
             target_origin=self.edith_url,
             order_wire_headers=False,
+            proxies=proxies,
         )
         # x-rap-param：信封算法与 PC 相同（rap.js 已字节级验证），但 Creator
         # 发布接口的指纹模板不同（436B，含键盘遥测/特征位；从浏览器 post_note
@@ -763,6 +773,7 @@ class XHS_Creator_Apis:
                 sec_fetch_site='same-origin',
                 b1_profile='note_manager',
                 mns_profile=mns_profile,
+                proxies=proxies,
             )
             self._note_manager_signed = True
             wire_headers = _creator_note_manager_headers(

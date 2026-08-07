@@ -1041,6 +1041,142 @@ class XHSCreatorLoginApi:
             self._cookies_for_url(self.creator_url, values)
         )
 
+    def start_qrcode_session(self) -> dict:
+        """Start a non-interactive QR login flow.
+
+        The returned object is suitable for an HTTP boundary: callers receive
+        the QR URL immediately and poll :meth:`poll_qrcode_session` themselves.
+        The existing terminal helper is implemented on top of these two methods
+        so there is only one login state machine to maintain.
+        """
+        message = '获取二维码失败'
+        for attempt in range(1, LOGIN_SESSION_MAX_ATTEMPTS + 1):
+            cookies, session = self._prepare_login_session()
+            if session['active']:
+                authenticated = self._accept_session(cookies)
+                self._complete_security()
+                if not authenticated:
+                    raise RuntimeError('Creator existing session acceptance failed')
+                return {
+                    'status': 'authenticated',
+                    'message': '检测到可复用的 Creator 会话',
+                    'cookies': authenticated,
+                }
+
+            self._complete_security()
+            success, message, qr_data = self.generate_qrcode(
+                self.profile.cookie_map
+            )
+            if success:
+                return {
+                    'status': 'waiting_scan',
+                    'message': QR_STATUS_MESSAGES[QR_STATUS_WAIT_SCAN],
+                    'qr_id': qr_data['qr_id'],
+                    'qr_url': qr_data['qr_url'],
+                    'support_channels': qr_data.get('support_channels', []),
+                }
+            logger.warning(
+                f'当前设备会话被边缘拒绝（{message}），'
+                f'重建匿名设备重试 ({attempt}/{LOGIN_SESSION_MAX_ATTEMPTS})'
+            )
+            self._reset_anonymous_session()
+        raise RuntimeError(message)
+
+    def poll_qrcode_session(self, qr_id: str) -> dict:
+        """Poll one QR login without sleeping or hiding the caller's cadence."""
+        detail = self.query_qrcode_status(qr_id)
+        status = detail['status']
+        if detail['success']:
+            authenticated = self._accept_session(detail['cookies'])
+            if not authenticated:
+                raise RuntimeError('Creator QR session acceptance failed')
+            return {
+                'status': 'authenticated',
+                'message': detail['message'],
+                'xhs_status': status,
+                'cookies': authenticated,
+                'avatar': detail.get('avatar') or '',
+            }
+        if status == QR_STATUS_WAIT_SCAN:
+            state = 'waiting_scan'
+        elif status == QR_STATUS_WAIT_CONFIRM:
+            state = 'waiting_confirm'
+        elif status == QR_STATUS_EXPIRED:
+            state = 'expired'
+        else:
+            state = 'failed'
+        return {
+            'status': state,
+            'message': detail['message'],
+            'xhs_status': status,
+            'avatar': detail.get('avatar') or '',
+        }
+
+    def start_phone_session(self, phone: str, zone: str = '86') -> dict:
+        """Send an SMS code without reading terminal input."""
+        phone = str(phone or '').strip()
+        zone = str(zone or '').strip()
+        if not phone:
+            raise ValueError('phone is required')
+        if not zone:
+            raise ValueError('zone is required')
+
+        message = '发送验证码失败'
+        for attempt in range(1, LOGIN_SESSION_MAX_ATTEMPTS + 1):
+            cookies, session = self._prepare_login_session()
+            if session['active']:
+                authenticated = self._accept_session(cookies)
+                self._complete_security()
+                if not authenticated:
+                    raise RuntimeError('Creator existing session acceptance failed')
+                return {
+                    'status': 'authenticated',
+                    'message': '检测到可复用的 Creator 会话',
+                    'cookies': authenticated,
+                }
+
+            self._complete_security()
+            success, message, _ = self.send_phone_code(
+                phone,
+                self.profile.cookie_map,
+                zone,
+            )
+            if success:
+                return {
+                    'status': 'waiting_code',
+                    'message': message,
+                    'phone': phone,
+                    'zone': zone,
+                }
+            logger.warning(
+                f'当前设备会话被边缘拒绝（{message}），'
+                f'重建匿名设备重试 ({attempt}/{LOGIN_SESSION_MAX_ATTEMPTS})'
+            )
+            self._reset_anonymous_session()
+        raise RuntimeError(message)
+
+    def complete_phone_session(
+        self,
+        phone: str,
+        code: str,
+        zone: str = '86',
+    ) -> dict:
+        """Verify an SMS code and return the authenticated Cookie."""
+        code = str(code or '').strip()
+        if not code:
+            raise ValueError('code is required')
+        success, message, result = self.login_by_phone(phone, code, zone=zone)
+        if not success:
+            return {'status': 'failed', 'message': message}
+        authenticated = self._accept_session(result['cookies'])
+        if not authenticated:
+            raise RuntimeError('Creator phone session acceptance failed')
+        return {
+            'status': 'authenticated',
+            'message': message,
+            'cookies': authenticated,
+        }
+
     @staticmethod
     def show_qrcode_terminal(url):
         import qrcode
@@ -1060,114 +1196,51 @@ class XHSCreatorLoginApi:
         qr.make_image(fill_color='black', back_color='white').show()
 
     def qrcode_login(self, show_in_terminal=True):
-        qr_data = None
-        cookies = None
-        for attempt in range(1, LOGIN_SESSION_MAX_ATTEMPTS + 1):
-            logger.info('[1/5] 正在初始化 Creator 4.3.6 匿名设备...')
-            cookies, session = self._prepare_login_session()
-            logger.debug(f'初始 Cookie 字段: {list(cookies)}')
-
-            logger.info('[2/5] 正在检查已有 Creator 会话...')
-            if session['active']:
-                logger.info('检测到可复用的 Creator 会话，跳过二维码')
-                accepted = self._accept_session(cookies)
-                self._complete_security()
-                if not accepted:
-                    return None
-                return self.cookies_to_str(
-                    self._cookies_for_url(self.creator_url)
-                )
-
-            self._complete_security()
-            cookies = self.profile.cookie_map
-            logger.info('[3/5] 正在获取二维码...')
-            success, message, qr_data = self.generate_qrcode(cookies)
-            if success:
-                break
-            # 406 是按设备会话标记的概率闸门：同会话重发无效，整包重建后再试
-            logger.warning(
-                f'当前设备会话被边缘拒绝（{message}），'
-                f'重建匿名设备重试 ({attempt}/{LOGIN_SESSION_MAX_ATTEMPTS})'
-            )
-            self._reset_anonymous_session()
-        else:
-            logger.error(f'获取二维码失败: {message}')
+        logger.info('[1/2] 正在准备 Creator 二维码登录...')
+        try:
+            result = self.start_qrcode_session()
+        except Exception as error:
+            logger.error(f'获取二维码失败: {error}')
             return None
+        if result['status'] == 'authenticated':
+            return result['cookies']
         logger.info('请使用小红书APP扫描以下二维码:')
         if show_in_terminal:
-            self.show_qrcode_terminal(qr_data['qr_url'])
+            self.show_qrcode_terminal(result['qr_url'])
         else:
-            self.show_qrcode_image(qr_data['qr_url'])
+            self.show_qrcode_image(result['qr_url'])
 
-        logger.info('[4/5] 等待扫码和手机确认...')
+        logger.info('[2/2] 等待扫码和手机确认...')
         last_status = None
         while True:
-            # Production BeerLogin schedules the first and subsequent polls
-            # one second after the previous poll completes.
             time.sleep(1)
-            detail = self.query_qrcode_status(qr_data['qr_id'])
+            detail = self.poll_qrcode_session(result['qr_id'])
             status = detail['status']
             if status != last_status:
                 logger.info(detail['message'])
                 last_status = status
-            if detail['success']:
-                break
-            if status in {QR_STATUS_ERROR, QR_STATUS_EXPIRED, None}:
+            if status == 'authenticated':
+                return detail['cookies']
+            if status in {'expired', 'failed'}:
                 logger.error(detail['message'])
                 return None
-            if status not in {QR_STATUS_WAIT_SCAN, QR_STATUS_WAIT_CONFIRM}:
-                logger.error(detail['message'])
-                return None
-
-        logger.info('[5/5] 验证正式 Creator 会话...')
-        return self._accept_session(detail['cookies'])
 
     def phone_login(self):
-        result = None
-        for attempt in range(1, LOGIN_SESSION_MAX_ATTEMPTS + 1):
-            logger.info('[1/5] 正在初始化 Creator 4.3.6 匿名设备...')
-            cookies, session = self._prepare_login_session()
-            logger.debug(f'初始 Cookie 字段: {list(cookies)}')
-
-            logger.info('[2/5] 正在检查已有 Creator 会话...')
-            if session['active']:
-                logger.info('检测到可复用的 Creator 会话，跳过短信验证')
-                accepted = self._accept_session(cookies)
-                self._complete_security()
-                if not accepted:
-                    return None
-                return self.cookies_to_str(
-                    self._cookies_for_url(self.creator_url)
-                )
-
-            self._complete_security()
-            cookies = self.profile.cookie_map
-            if attempt == 1:
-                phone = input('请输入手机号: ')
-            logger.info('[3/5] 正在发送验证码...')
-            success, message, result = self.send_phone_code(phone, cookies)
-            if success:
-                break
-            # 与 qr-code 相同的按会话概率闸门：整包重建后再发
-            logger.warning(
-                f'当前设备会话被边缘拒绝（{message}），'
-                f'重建匿名设备重试 ({attempt}/{LOGIN_SESSION_MAX_ATTEMPTS})'
-            )
-            self._reset_anonymous_session()
-        else:
-            logger.error(f'发送失败: {message}')
+        phone = input('请输入手机号: ')
+        try:
+            result = self.start_phone_session(phone)
+        except Exception as error:
+            logger.error(f'发送失败: {error}')
             return None
+        if result['status'] == 'authenticated':
+            return result['cookies']
         logger.info('验证码已发送')
-
         code = input('请输入验证码: ')
-        logger.info('[4/5] 正在验证...')
-        success, message, result = self.login_by_phone(phone, code)
-        if not success:
-            logger.error(f'验证失败: {message}')
+        completed = self.complete_phone_session(phone, code)
+        if completed['status'] != 'authenticated':
+            logger.error(f'验证失败: {completed["message"]}')
             return None
-
-        logger.info('[5/5] 验证正式 Creator 会话...')
-        return self._accept_session(result['cookies'])
+        return completed['cookies']
 
 
 __all__ = ['XHSCreatorLoginApi']

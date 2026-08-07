@@ -65,9 +65,15 @@ class DsFetcher:
         # dsl_pair = str(int(time.time()*1000)) + ';' + dsl
     """
 
-    def __init__(self, ttl: int = _TTL, url: str = _DS_URL):
+    def __init__(
+        self,
+        ttl: int = _TTL,
+        url: str = _DS_URL,
+        referer: str = 'https://www.xiaohongshu.com/',
+    ):
         self._ttl = ttl
         self._url = url
+        self._referer = referer
         self._value: Optional[str] = None
         self._fetched_at: float = 0.0
         self._lock = threading.Lock()
@@ -124,7 +130,7 @@ class DsFetcher:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
                           'AppleWebKit/537.36 (KHTML, like Gecko) '
                           'Chrome/150.0.0.0 Safari/537.36',
-            'Referer': 'https://www.xiaohongshu.com/',
+            'Referer': self._referer,
             'Accept': '*/*',
         }
         if http_client is None:

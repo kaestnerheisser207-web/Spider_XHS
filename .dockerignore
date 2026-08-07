@@ -1,0 +1,14 @@
+.git
+.gitignore
+.env
+.venv
+__pycache__
+*.pyc
+*.pyo
+node_modules
+datas
+downloads
+service_tests
+source
+reverse_pc_*
+_live_session.json

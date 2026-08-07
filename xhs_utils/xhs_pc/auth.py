@@ -57,11 +57,15 @@ _AUTH_FACTORY_TOKEN = object()
 class XHSPcAuth(XHSAuth):
     """PC Web authentication plus every mutable input used by the signer.
 
-    XHSPcAuth can only be created through one of the three explicit factories::
+    XHSPcAuth can only be created through an explicit factory::
 
         auth = XHSPcAuth.from_cookie(saved_cookie)
         auth = XHSPcAuth.from_qrcode_login()
         auth = XHSPcAuth.from_phone_login()
+
+    The HTTP service additionally uses :meth:`from_completed_login` to transfer
+    the same transport and device state after splitting an interactive login
+    across multiple requests.
 
     Authentication has exactly three normal sources:
 
@@ -194,8 +198,8 @@ class XHSPcAuth(XHSAuth):
         if _factory_token is not _AUTH_FACTORY_TOKEN:
             raise TypeError(
                 'XHSPcAuth cannot be constructed directly; use '
-                'XHSPcAuth.from_cookie(), from_qrcode_login(), or '
-                'from_phone_login()'
+                'XHSPcAuth.from_cookie(), from_qrcode_login(), '
+                'from_phone_login(), or from_completed_login()'
             )
         self.login_source = self._bind_platform(self.login_source)
         if self.http_client is None:
@@ -422,6 +426,37 @@ class XHSPcAuth(XHSAuth):
             cookies=cookies,
             _factory_token=_AUTH_FACTORY_TOKEN,
             **auth_kwargs,
+        )
+
+    @classmethod
+    def from_completed_login(
+        cls,
+        login_client: Any,
+        cookies: Any,
+        *,
+        login_source: str,
+    ) -> 'XHSPcAuth':
+        """Transfer a completed non-interactive login into managed PC Auth.
+
+        The HTTP service splits QR and phone login across caller requests, so
+        it cannot use the blocking factories above.  This factory keeps the
+        login client's HTTP/2 session, host-scoped cookies, device profile and
+        proxy bound to the authenticated session instead of rebuilding them.
+        Ownership of the login client's transport transfers to the returned
+        Auth; callers must not close the login client afterwards.
+        """
+        if login_source not in {'qrcode', 'phone'}:
+            raise ValueError('login_source must be qrcode or phone')
+        return cls(
+            cookies=cookies,
+            login_source=login_source,
+            proxies=login_client.proxies,
+            http_client=login_client.http,
+            profile=login_client.profile,
+            host_cookies=login_client.host_cookies_snapshot(),
+            host_cookie_state=login_client.host_cookie_state(),
+            cookie_source_url=PC_PLATFORM_CONFIG.origin('api'),
+            _factory_token=_AUTH_FACTORY_TOKEN,
         )
 
     @classmethod

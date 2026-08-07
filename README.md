@@ -305,9 +305,216 @@ python -m spider.spider
 
 ### 🐳 Docker 部署（可选）
 
+Docker 镜像默认启动独立 HTTP 服务，而不是运行示例爬虫。服务密钥是必填项；
+所有 `/v1` 业务接口都要求 `Authorization: Bearer <key>`。
+
 ```bash
 docker build -t spider_xhs .
-docker run -e COOKIES='your_cookie_here' spider_xhs
+docker run --rm \
+  -p 127.0.0.1:5000:5000 \
+  -e XHS_SERVICE_API_KEY='replace-with-a-long-random-value' \
+  spider_xhs
+```
+
+启动后可访问 OpenAPI 页面 `http://127.0.0.1:5000/docs`，健康检查为
+`GET /healthz`，就绪状态为 `GET /readyz`。如果仍要运行原来的本地爬虫示例，
+可覆盖容器命令：
+
+```bash
+docker run --rm -e COOKIES='your_cookie_here' spider_xhs \
+  python -m spider.spider
+```
+
+生产 Compose 使用同一个镜像，但把密钥、监听地址和端口留给部署环境：
+
+```bash
+XHS_SERVICE_IMAGE=spider-xhs-service:release \
+XHS_SERVICE_API_KEY='至少32位高熵随机值' \
+XHS_SERVICE_BIND_ADDRESS=172.17.0.1 \
+XHS_SERVICE_BIND_PORT=4130 \
+docker compose -f compose.production.yml up -d
+```
+
+`172.17.0.1` 适用于同一 Docker 主机上的其他容器通过
+`host.docker.internal:4130` 调用，同时不会把 XHS Service 直接暴露到公网；其他
+环境应按实际 Docker 网桥地址配置，不要把这个地址写进应用代码。
+
+### 🌐 Creator HTTP 服务
+
+HTTP 层直接复用本仓库的全部 Creator 登录、账号、作品、媒体与发布能力，不要求
+调用方了解 b1、MNS、DS、X-s 或上传签名。它维护两类带 TTL 的进程内状态：未完成
+的登录流程和已经认证的 Creator 会话。默认登录流程保留 10 分钟，认证会话保留 24 小时；
+分别通过 `XHS_LOGIN_TTL_SECONDS` 和 `XHS_SESSION_TTL_SECONDS` 调整。
+
+服务固定使用一个 Uvicorn worker，因为每个登录流程都持有可变的设备指纹、Cookie
+和 HTTP/2 Session。容器重启会清空 `login_id` 和 `session_id`；调用方可重新扫码，
+或用自己保存的完整 Creator Cookie 重建会话。多个实例应由调用方保持会话粘性，
+不要对同一个 `session_id` 做无状态负载均衡。
+
+生产环境只应监听回环地址或私有网络，并由可信入口终止 TLS、限制请求体大小；不要把
+容器的 `5000` 端口直接暴露到公网。API 密钥和 `session_id` 都按账号操作凭据保护。
+
+主要接口：
+
+| 方法 | 路径 | 用途 |
+|------|------|------|
+| `POST` | `/v1/creator/sessions/cookie` | 导入并可选验证完整 Creator Cookie |
+| `POST` | `/v1/creator/logins/qr` | 创建二维码登录，立即返回二维码 URL |
+| `GET` | `/v1/creator/logins/qr/{login_id}` | 查询扫码/确认状态，成功后返回 `session_id` |
+| `POST` | `/v1/creator/logins/phone` | 发送短信验证码 |
+| `POST` | `/v1/creator/logins/phone/{login_id}/verify` | 验证短信并返回 `session_id` |
+| `POST` | `/v1/creator/account` | 获取当前 Creator 账号信息并验证登录态 |
+| `POST` | `/v1/creator/topics/search` | 按关键词搜索 Creator 话题 |
+| `POST` | `/v1/creator/locations/search` | 按关键词搜索发布地点/POI |
+| `POST` | `/v1/creator/media/permit` | 获取图片或视频上传许可 |
+| `POST` | `/v1/creator/media/upload` | 上传单张图片或单个视频并返回媒体标识 |
+| `POST` | `/v1/creator/videos/transcode` | 查询视频转码状态；上游可能要求 PC `web_session` |
+| `POST` | `/v1/creator/files/encryption` | 获取图片文件的 Creator 加密信息 |
+| `POST` | `/v1/creator/posts/posted/page` | 获取一页已发布作品及下一页游标 |
+| `POST` | `/v1/creator/posts/posted/all` | 跟随游标获取全部已发布作品 |
+| `POST` | `/v1/creator/posts` | 使用会话发布图文或视频笔记 |
+| `GET`/`DELETE` | `/v1/creator/sessions/{session_id}` | 检查或关闭会话 |
+
+除登录状态查询和会话检查/关闭外，认证后的 Creator 能力统一通过 JSON 请求体接收
+`session_id`，避免账号操作凭据出现在查询字符串中。账号信息、话题、地点、上传许可、
+媒体上传、转码、文件加密和作品列表都可以独立调用，不要求先调用发布接口。
+
+导入 Cookie：
+
+```bash
+curl http://127.0.0.1:5000/v1/creator/sessions/cookie \
+  -H 'Authorization: Bearer replace-with-a-long-random-value' \
+  -H 'Content-Type: application/json' \
+  -d '{"cookies":"完整 Creator Cookie","validate":true}'
+```
+
+二维码登录分两步。第一步返回 `login_id`、`qr_url` 和过期时间，调用方展示
+`qr_url`；第二步按合理间隔查询，状态依次可能为 `waiting_scan`、
+`waiting_confirm` 和 `authenticated`：
+
+```bash
+curl -X POST http://127.0.0.1:5000/v1/creator/logins/qr \
+  -H 'Authorization: Bearer replace-with-a-long-random-value' \
+  -H 'Content-Type: application/json' \
+  -d '{}'
+
+curl http://127.0.0.1:5000/v1/creator/logins/qr/login_xxx \
+  -H 'Authorization: Bearer replace-with-a-long-random-value'
+```
+
+发布接口接受 base64 字节或 base64 data URL。图文使用 `images`，视频使用
+`video`；服务内部继续执行 Spider_XHS 已实现的媒体许可、上传、视频封面与转码
+检查、地点/话题解析和最终发布流程：
+
+```bash
+curl http://127.0.0.1:5000/v1/creator/posts \
+  -H 'Authorization: Bearer replace-with-a-long-random-value' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "session_id":"session_xxx",
+    "title":"标题",
+    "description":"正文",
+    "media_type":"image",
+    "images":[{"data":"BASE64_IMAGE_BYTES"}],
+    "topics":["旅行"]
+  }'
+```
+
+`proxies` 可在登录、Cookie 导入或单次发布请求中传入，例如
+`{"http":"http://user:pass@host:port","https":"http://user:pass@host:port"}`。
+因为全部 XHS 上游地址都是 HTTPS，传入代理时必须至少包含 `https` 或 `all`；代理
+URL 支持 HTTP、HTTPS、SOCKS4 和 SOCKS5。二维码轮询和短信验证固定继承创建登录
+流程时的代理，登录成功后该代理继续成为认证会话的默认代理。
+
+发布请求没有显式传 `proxies` 时，地点、话题、DS 安全素材、上传许可、图片/视频与
+封面上传、转码查询和最终发布全部继承会话默认代理；显式传入时，则由这份代理完整
+覆盖本次发布的所有子请求，不允许其中某一步回落为直连。服务不会在响应中返回
+Cookie 或代理，但 `session_id` 本身具有账号操作权限，必须按凭据保护；不要启用
+`XHS_CREATOR_DEBUG=1`，该逆向诊断开关会打印请求实况。
+
+### 🖥️ PC Web HTTP 服务
+
+PC Web 与 Creator 使用相同的服务进程和 Bearer 服务密钥，但拥有独立的登录流程与
+会话命名空间。PC 会话支持完整 Cookie 导入、二维码登录和手机验证码登录；认证后
+可调用 `apis/xhs_pc_apis.py` 中全部公开的数据能力。PC 的 `login_id`、`session_id`
+同样只保存在当前进程内，重启后需要重新登录或重新导入 Cookie。
+
+会话与登录：
+
+| 方法 | 路径 | 用途 |
+|------|------|------|
+| `POST` | `/v1/pc/sessions/cookie` | 导入完整 PC Cookie，验证账号并创建会话 |
+| `POST` | `/v1/pc/logins/qr` | 创建 PC 二维码登录并返回二维码 URL |
+| `GET` | `/v1/pc/logins/qr/{login_id}` | 查询扫码/确认状态，成功后返回 PC `session_id` |
+| `POST` | `/v1/pc/logins/phone` | 发送 PC 登录短信验证码 |
+| `POST` | `/v1/pc/logins/phone/{login_id}/verify` | 验证短信并返回 PC `session_id` |
+| `GET`/`DELETE` | `/v1/pc/sessions/{session_id}` | 检查或关闭 PC 会话 |
+
+Rednote PC 手机登录是独立 surface，不复用上述 Xiaohongshu PC 的客户端、Cookie、
+`login_id` 或 `session_id`。它使用 `www.rednote.com`、`webapi.rednote.com` 和
+`as.rednote.com`，并在发送验证码前独立完成匿名 Cookie、DS/scripting、
+`login/activate` 与 `webprofile` 初始化。
+
+| 方法 | 路径 | 用途 |
+|------|------|------|
+| `POST` | `/v1/rednote/logins/phone` | 初始化 Rednote 访客态并发送登录短信验证码 |
+| `POST` | `/v1/rednote/logins/phone/{login_id}/verify` | 验证短信并返回 Rednote `session_id` |
+| `GET`/`DELETE` | `/v1/rednote/sessions/{session_id}` | 检查或关闭 Rednote 会话 |
+
+搜索、内容和用户：
+
+| 方法 | 路径 | 用途 |
+|------|------|------|
+| `POST` | `/v1/pc/account` | 读取当前 PC 账号信息 |
+| `POST` | `/v1/pc/search/keywords` | 获取搜索联想词 |
+| `POST` | `/v1/pc/search/notes/page` | 按页搜索笔记，完整暴露筛选参数和 `search_id` |
+| `POST` | `/v1/pc/search/notes/all` | 按数量连续读取搜索笔记 |
+| `POST` | `/v1/pc/search/users/page` | 按页搜索用户 |
+| `POST` | `/v1/pc/search/users/all` | 按数量连续读取搜索用户 |
+| `POST` | `/v1/pc/notes/detail` | 读取笔记详情 |
+| `POST` | `/v1/pc/notes/comments/outer/page` | 读取一页一级评论 |
+| `POST` | `/v1/pc/notes/comments/outer/all` | 读取全部一级评论 |
+| `POST` | `/v1/pc/notes/comments/inner/page` | 读取一页二级评论 |
+| `POST` | `/v1/pc/notes/comments/inner/all` | 读取某条一级评论的全部二级评论 |
+| `POST` | `/v1/pc/notes/comments/all` | 读取笔记的全部一级和二级评论 |
+| `POST` | `/v1/pc/users/profile` | 读取用户主页信息 |
+| `POST` | `/v1/pc/users/posts/page` | 读取一页用户发布笔记 |
+| `POST` | `/v1/pc/users/posts/all` | 读取用户全部发布笔记 |
+| `POST` | `/v1/pc/users/likes/page` | 读取一页用户喜欢笔记 |
+| `POST` | `/v1/pc/users/likes/all` | 读取用户全部喜欢笔记 |
+| `POST` | `/v1/pc/users/collects/page` | 读取一页用户收藏笔记 |
+| `POST` | `/v1/pc/users/collects/all` | 读取用户全部收藏笔记 |
+
+首页、通知和媒体解析：
+
+| 方法 | 路径 | 用途 |
+|------|------|------|
+| `POST` | `/v1/pc/feed/channels` | 读取首页全部频道 |
+| `POST` | `/v1/pc/feed/page` | 读取一页首页推荐笔记 |
+| `POST` | `/v1/pc/feed/all` | 按数量连续读取首页推荐笔记 |
+| `POST` | `/v1/pc/notifications/unread` | 读取未读消息数量 |
+| `POST` | `/v1/pc/notifications/mentions/page` | 读取一页评论与 @ 提醒 |
+| `POST` | `/v1/pc/notifications/mentions/all` | 读取全部评论与 @ 提醒 |
+| `POST` | `/v1/pc/notifications/reactions/page` | 读取一页点赞与收藏提醒 |
+| `POST` | `/v1/pc/notifications/reactions/all` | 读取全部点赞与收藏提醒 |
+| `POST` | `/v1/pc/notifications/follows/page` | 读取一页新增关注 |
+| `POST` | `/v1/pc/notifications/follows/all` | 读取全部新增关注 |
+| `POST` | `/v1/pc/media/video/resolve` | 根据笔记 ID 生成无水印视频地址 |
+| `POST` | `/v1/pc/media/image/resolve` | 将图片地址转换为无水印原图地址 |
+
+除两个纯 URL 转换接口外，PC 数据接口都通过 JSON 请求体接收 `session_id` 和可选的
+`proxies`。例如先导入 Cookie，再查询笔记：
+
+```bash
+curl http://127.0.0.1:5000/v1/pc/sessions/cookie \
+  -H 'Authorization: Bearer replace-with-a-long-random-value' \
+  -H 'Content-Type: application/json' \
+  -d '{"cookies":"完整 PC Cookie"}'
+
+curl http://127.0.0.1:5000/v1/pc/notes/detail \
+  -H 'Authorization: Bearer replace-with-a-long-random-value' \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id":"pc_session_xxx","url":"小红书笔记链接"}'
 ```
 
 ---
@@ -350,6 +557,13 @@ Spider_XHS/
 │   ├── xhs_creator_util.py          # Creator上传/发布业务数据辅助
 │   ├── xhs_pugongying_util.py       # 蒲公英平台工具
 │   └── xhs_qianfan_util.py          # 千帆平台工具
+├── xhs_service/                      # 独立 Xiaohongshu PC、Rednote PC 与 Creator HTTP 服务
+│   ├── app.py                        # FastAPI 应用、鉴权和全部 surface 路由
+│   ├── pc.py                         # PC 登录、数据、通知和媒体路由
+│   ├── rednote.py                    # Rednote PC 手机登录与会话路由
+│   ├── models.py                     # 各 surface 共用的登录与能力请求模型
+│   └── state.py                      # 各 surface 相互隔离的登录与认证会话状态
+├── service_tests/                    # HTTP 服务与非交互登录测试
 ├── .env.example                     # 本地配置模板；复制为 .env 使用
 ├── requirements.txt
 ├── Dockerfile
@@ -429,5 +643,3 @@ ps: 请加群，人满或者过期 issue | wx 提醒
 | group-1 | group-2 | group-3 |
 |:--:|:--:|:--:|
 | <img width="280" alt="group1" src="https://cvcat.site/assets/group1.jpg" /> | <img width="280" alt="group2" src="https://cvcat.site/assets/group2.jpg" /> | <img width="280" alt="group3" src="https://cvcat.site/assets/group3.jpg" /> |
-
-

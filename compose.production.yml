@@ -1,0 +1,38 @@
+name: spider-xhs-service
+
+x-json-logging: &json-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "10"
+
+services:
+  xhs-service:
+    image: "${XHS_SERVICE_IMAGE:?XHS_SERVICE_IMAGE is required}"
+    pull_policy: "${XHS_SERVICE_PULL_POLICY:-missing}"
+    init: true
+    user: "10001:10001"
+    read_only: true
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      XHS_SERVICE_API_KEY: "${XHS_SERVICE_API_KEY:?XHS_SERVICE_API_KEY is required}"
+      XHS_LOGIN_TTL_SECONDS: "${XHS_LOGIN_TTL_SECONDS:-600}"
+      XHS_SESSION_TTL_SECONDS: "${XHS_SESSION_TTL_SECONDS:-86400}"
+    ports:
+      - "${XHS_SERVICE_BIND_ADDRESS:-127.0.0.1}:${XHS_SERVICE_BIND_PORT:-5000}:5000"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=1g,mode=1777
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:5000/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    stop_grace_period: 180s
+    mem_limit: 3g
+    pids_limit: 256
+    logging: *json-logging

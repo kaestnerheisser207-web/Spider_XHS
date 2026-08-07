@@ -222,11 +222,21 @@ class XHSCreatorAuth(XHSAuth):
             version=version,
         )
 
-    def dsl_pair(self, timestamp_ms: Optional[int] = None) -> str:
-        self.ensure_ds_material()
+    def dsl_pair(
+        self,
+        timestamp_ms: Optional[int] = None,
+        *,
+        proxies: Optional[dict] = None,
+    ) -> str:
+        self.ensure_ds_material(proxies=proxies)
         return self.profile.dsl_pair(timestamp_ms)
 
-    def ensure_ds_material(self, force: bool = False) -> None:
+    def ensure_ds_material(
+        self,
+        force: bool = False,
+        *,
+        proxies: Optional[dict] = None,
+    ) -> None:
         """Ensure both ``_dsl`` and the matching server-issued ``_dsf`` program.
 
         Creator ``mns0101`` calls ``_dsf(null, 24-byte input)`` from the DS
@@ -245,7 +255,7 @@ class XHSCreatorAuth(XHSAuth):
         from .dsl import get_ds_bundle
 
         dsl, program = get_ds_bundle(
-            proxies=self.proxies,
+            proxies=self.proxies if proxies is None else proxies,
             force=force,
             http_client=self.http_client,
         )
@@ -255,8 +265,8 @@ class XHSCreatorAuth(XHSAuth):
         if force:
             self.profile.session.dsllt = now_ms()
 
-    def refresh_dsl(self) -> str:
-        self.ensure_ds_material(force=True)
+    def refresh_dsl(self, *, proxies: Optional[dict] = None) -> str:
+        self.ensure_ds_material(force=True, proxies=proxies)
         return self.profile.dsl_pair()
 
     def update_cookies(self, cookies: Any, *, source_url: str = '') -> None:
@@ -316,6 +326,39 @@ class XHSCreatorAuth(XHSAuth):
         )
 
     @classmethod
+    def from_completed_login(
+        cls,
+        login: Any,
+        cookies: Any,
+        *,
+        login_source: str,
+        **auth_kwargs,
+    ) -> 'XHSCreatorAuth':
+        """Transfer a completed non-interactive login into a ready Auth.
+
+        HTTP services use this after a QR poll or SMS verification completes.
+        Ownership of the winning login transport moves to the returned Auth;
+        callers must close the Auth rather than closing ``login`` afterward.
+        """
+        if login_source not in {'qrcode', 'phone'}:
+            raise ValueError('login_source must be qrcode or phone')
+        if not cookies:
+            raise ValueError('completed login cookies are required')
+        values = dict(auth_kwargs)
+        values['login_source'] = login_source
+        values['proxies'] = login.proxies
+        values['http_client'] = login.http
+        values['host_cookies'] = login.host_cookies_snapshot()
+        values['host_cookie_state'] = login.host_cookie_state()
+        values['cookie_source_url'] = CREATOR_PLATFORM_CONFIG.origin('api')
+        return cls(
+            cookies=cookies,
+            profile=login.profile,
+            _factory_token=_AUTH_FACTORY_TOKEN,
+            **values,
+        )
+
+    @classmethod
     def from_qrcode_login(
         cls,
         *,
@@ -338,16 +381,10 @@ class XHSCreatorAuth(XHSAuth):
         if not cookies:
             login.close()
             raise RuntimeError('Creator QR login did not return an authenticated Cookie')
-        auth_kwargs['login_source'] = 'qrcode'
-        # 登录期间的会话级重试可能已重建传输实例，使用最终获胜会话的 client
-        auth_kwargs['http_client'] = login.http
-        auth_kwargs['host_cookies'] = login.host_cookies_snapshot()
-        auth_kwargs['host_cookie_state'] = login.host_cookie_state()
-        auth_kwargs['cookie_source_url'] = CREATOR_PLATFORM_CONFIG.origin('api')
-        return cls(
-            cookies=cookies,
-            profile=profile,
-            _factory_token=_AUTH_FACTORY_TOKEN,
+        return cls.from_completed_login(
+            login,
+            cookies,
+            login_source='qrcode',
             **auth_kwargs,
         )
 
@@ -369,16 +406,10 @@ class XHSCreatorAuth(XHSAuth):
         if not cookies:
             login.close()
             raise RuntimeError('Creator phone login did not return an authenticated Cookie')
-        auth_kwargs['login_source'] = 'phone'
-        # 登录期间的会话级重试可能已重建传输实例，使用最终获胜会话的 client
-        auth_kwargs['http_client'] = login.http
-        auth_kwargs['host_cookies'] = login.host_cookies_snapshot()
-        auth_kwargs['host_cookie_state'] = login.host_cookie_state()
-        auth_kwargs['cookie_source_url'] = CREATOR_PLATFORM_CONFIG.origin('api')
-        return cls(
-            cookies=cookies,
-            profile=profile,
-            _factory_token=_AUTH_FACTORY_TOKEN,
+        return cls.from_completed_login(
+            login,
+            cookies,
+            login_source='phone',
             **auth_kwargs,
         )
 

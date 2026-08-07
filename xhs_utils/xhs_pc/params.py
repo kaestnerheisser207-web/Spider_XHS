@@ -328,6 +328,7 @@ def get_request_headers_template(
     method='POST',
     accept_language=PC_BUSINESS_ACCEPT_LANGUAGE,
     has_body=None,
+    web_origin='https://www.xiaohongshu.com',
 ):
     context = sign_context or {}
     user_agent = context.get(
@@ -337,7 +338,7 @@ def get_request_headers_template(
     )
     headers = {
         'sec-ch-ua-platform': '"Windows"',
-        'referer': 'https://www.xiaohongshu.com/',
+        'referer': str(web_origin).rstrip('/') + '/',
         'sec-ch-ua': context.get('secChUa', PC_SEC_CH_UA),
         'x-xray-traceid': generate_xray_traceid(),
         'sec-ch-ua-mobile': '?0',
@@ -348,7 +349,7 @@ def get_request_headers_template(
         'accept': 'application/json, text/plain, */*',
         'x-s': '',
         'accept-language': str(accept_language),
-        'origin': 'https://www.xiaohongshu.com',
+        'origin': str(web_origin).rstrip('/'),
         'priority': 'u=1, i',
         'sec-fetch-dest': 'empty',
         'sec-fetch-mode': 'cors',
@@ -411,7 +412,7 @@ def build_pc_business_headers(headers, cookies, *, api, method='POST'):
 def generate_headers(
     a1, api, data='', method='POST', user_id: str = '', cookie: str = '',
     b1=None, dsl_pair=None, with_xy_direction: bool = False,
-    tier=None, sign_context=None,
+    tier=None, sign_context=None, web_origin='https://www.xiaohongshu.com',
 ):
     # user_id 用于可选 xy-direction；签名材料仍强制在 generate_xs_xs_common / generate_request_params 校验
     xs, xt, xs_common = generate_xs_xs_common(
@@ -423,6 +424,7 @@ def generate_headers(
         sign_context,
         method=method,
         has_body=data not in ('', None),
+        web_origin=web_origin,
     )
     headers['x-s'] = xs
     headers['x-t'] = str(xt)
@@ -444,7 +446,7 @@ def generate_headers(
 def generate_request_params(
     cookies_str, api, data='', method='POST', user_id: str = '', b1=None,
     dsl_pair=None, doc_cookie: str = '', with_xy_direction: bool = False,
-    tier=None, sign_context=None,
+    tier=None, sign_context=None, web_origin='https://www.xiaohongshu.com',
 ):
     # Network Cookie 已含 a1 时可直接复用，不必再传一份 document.cookie
     sign_cookie = doc_cookie or cookies_str
@@ -464,7 +466,8 @@ def generate_request_params(
     headers, data = generate_headers(
         a1, api, data, method, user_id=user_id,
         cookie=sign_cookie, b1=b1, dsl_pair=dsl_pair,
-        with_xy_direction=with_xy_direction, tier=tier, sign_context=sign_context,
+        with_xy_direction=with_xy_direction, tier=tier,
+        sign_context=sign_context, web_origin=web_origin,
     )
     return headers, cookies, data
 

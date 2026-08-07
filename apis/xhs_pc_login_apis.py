@@ -7,7 +7,7 @@ from loguru import logger
 from xhs_utils.http_util import REQUEST_TIMEOUT
 from xhs_utils.xhs_core.auth import PC_PLATFORM_CONFIG
 from xhs_utils.xhs_core.cookies import HostCookieStore
-from xhs_utils.xhs_pc.dsl import get_dsl
+from xhs_utils.xhs_pc.dsl import DsFetcher
 from xhs_utils.xhs_pc.http import PcHttpClient
 from xhs_utils.xhs_pc.params import (
     PC_LOGIN_ACCEPT_LANGUAGE,
@@ -29,6 +29,59 @@ from xhs_utils.common_util import generate_a1, generate_web_id
 
 
 _GETDSS_RE = re.compile(r"function\s+getdss\s*\(\s*\)\s*\{\s*return\s+'(\d+)'")
+
+
+class PcLoginUpstreamError(RuntimeError):
+    """PC login failure with an explicitly safe diagnostic payload."""
+
+    def __init__(self, code, message, diagnostics):
+        super().__init__(message)
+        self.code = code
+        self.diagnostics = dict(diagnostics)
+
+
+def _safe_diagnostic_scalar(value):
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value[:128]
+    return f'<{type(value).__name__}>'
+
+
+_LOGIN_SENSITIVE_KEYS = frozenset({
+    'session',
+    'authorization',
+    'cookies',
+    'cookie',
+    'web_session',
+    'id_token',
+    'access_token',
+    'refresh_token',
+    'ticket',
+    'token',
+})
+
+
+def _redact_login_response(value):
+    """Mask credential-bearing fields in an upstream login response.
+
+    ``code`` / ``msg`` / ``code_status`` and every other field stay intact so
+    the real upstream error is visible in the logs; only session, cookie and
+    authorization material is replaced.
+    """
+    if isinstance(value, dict):
+        return {
+            key: (
+                '***'
+                if key.lower() in _LOGIN_SENSITIVE_KEYS
+                and value[key] is not None
+                else _redact_login_response(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_login_response(item) for item in value]
+    return value
 
 
 class XHSLoginApi:
@@ -57,8 +110,9 @@ class XHSLoginApi:
         web_profile_i12_seed=None,
         web_profile_fi=None,
         http_client=None,
+        platform_config=PC_PLATFORM_CONFIG,
     ):
-        self.platform_config = PC_PLATFORM_CONFIG
+        self.platform_config = platform_config
         self.base_url = self.platform_config.origin('api')
         self.as_url = self.platform_config.origin('security')
         self.web_url = self.platform_config.origin('web')
@@ -82,6 +136,14 @@ class XHSLoginApi:
         self.web_profile_i12_seed = web_profile_i12_seed
         self.web_profile_fi = web_profile_fi
         self._cookie_store = HostCookieStore()
+        self._dsl_fetcher = DsFetcher(
+            url=(
+                self.as_url
+                + '/api/sec/v1/ds?appId='
+                + self.platform_config.app_id
+            ),
+            referer=self.web_url + '/',
+        )
 
     def close(self):
         self.http.close()
@@ -109,18 +171,17 @@ class XHSLoginApi:
             )
         return profile
 
-    @staticmethod
-    def _get_sec_headers(sign_context=None, *, method='POST'):
+    def _get_sec_headers(self, sign_context=None, *, method='POST'):
         context = sign_context or {}
         headers = {
             'sec-ch-ua-platform': '"Windows"',
-            'referer': 'https://www.xiaohongshu.com/',
+            'referer': self.web_url + '/',
             'sec-ch-ua': context.get('secChUa', PC_SEC_CH_UA),
             'sec-ch-ua-mobile': '?0',
             'user-agent': context.get('userAgent', REFERENCE_PROFILE['release']['userAgent']),
             'accept': 'application/json, text/plain, */*',
             'accept-language': PC_LOGIN_ACCEPT_LANGUAGE,
-            'origin': 'https://www.xiaohongshu.com',
+            'origin': self.web_url,
             'priority': 'u=1, i',
             'sec-fetch-dest': 'empty',
             'sec-fetch-mode': 'cors',
@@ -176,7 +237,7 @@ class XHSLoginApi:
             )
         b1 = self._login_b1 if include_b1 else ''
         if not self.dsl:
-            self.dsl = get_dsl(
+            self.dsl = self._dsl_fetcher.get(
                 proxies=self.proxies,
                 http_client=self.http,
             )
@@ -195,6 +256,7 @@ class XHSLoginApi:
             doc_cookie=profile.document_cookie,
             tier=sign_context['tier'],
             sign_context=sign_context,
+            web_origin=self.web_url,
         )
         headers['accept-language'] = PC_LOGIN_ACCEPT_LANGUAGE
         if sec_domain:
@@ -320,7 +382,10 @@ class XHSLoginApi:
 
     def _fetch_sbtsource(self, cookies):
         api = '/api/sec/v1/sbtsource'
-        payload = {'callFrom': 'web', 'appId': 'xhs-pc-web'}
+        payload = {
+            'callFrom': 'web',
+            'appId': self.platform_config.app_id,
+        }
         headers, body = self._signed_request_params(
             cookies,
             api,
@@ -346,7 +411,7 @@ class XHSLoginApi:
     def _initialize_security(self, cookies):
         """Run the two cold-start security programs in browser order."""
         if not self.dsl:
-            self.dsl = get_dsl(
+            self.dsl = self._dsl_fetcher.get(
                 proxies=self.proxies,
                 http_client=self.http,
             )
@@ -357,7 +422,12 @@ class XHSLoginApi:
 
         ds_res = self._post_scripting(
             cookies,
-            {"callFrom": "web", "callback": "", "type": "ds", "appId": "xhs-pc-web"},
+            {
+                "callFrom": "web",
+                "callback": "",
+                "type": "ds",
+                "appId": self.platform_config.app_id,
+            },
             tier='0201',
         )
         ds_code = str(((ds_res.get('data') or {}).get('data')) or '')
@@ -633,8 +703,26 @@ class XHSLoginApi:
 
         res = resp.json()
         data = res.get('data') or {}
+        diagnostics = {
+            'phase': 'qr_finalize',
+            'http_status': getattr(resp, 'status_code', None),
+            'upstream_success': _safe_diagnostic_scalar(res.get('success')),
+            'upstream_code': _safe_diagnostic_scalar(res.get('code')),
+            'code_status': _safe_diagnostic_scalar(data.get('code_status')),
+            'login_session_present': bool(
+                (data.get('login_info') or {}).get('session')
+            ),
+        }
         if not res.get('success') or data.get('code_status') != 2:
-            raise RuntimeError(res.get('msg') or '二维码最终登录状态无效')
+            logger.error(
+                'PC QR finalize 上游拒绝，完整响应: {}',
+                _redact_login_response(res),
+            )
+            raise PcLoginUpstreamError(
+                'pc_qr_finalize_rejected',
+                res.get('msg') or '二维码最终登录状态无效',
+                diagnostics,
+            )
         login_info = data.get('login_info') or {}
         session = str(login_info.get('session') or '')
         if session:
@@ -645,7 +733,11 @@ class XHSLoginApi:
             cookies['web_session'] = session
             self.profile.update_cookies(cookies)
         elif not cookies.get('web_session') or cookies.get('web_session') == visitor_session:
-            raise RuntimeError('二维码登录响应缺少正式 web_session')
+            raise PcLoginUpstreamError(
+                'pc_qr_session_missing',
+                '二维码登录响应缺少正式 web_session',
+                diagnostics,
+            )
 
         return cookies
 

@@ -67,6 +67,23 @@ PC_PLATFORM_CONFIG = XHSPlatformConfig(
 )
 
 
+REDNOTE_PC_PLATFORM_CONFIG = XHSPlatformConfig(
+    name='rednote-pc',
+    app_id='xhs-pc-web',
+    cookie_domain='.rednote.com',
+    origins={
+        'web': 'https://www.rednote.com',
+        'api': 'https://webapi.rednote.com',
+        'search': 'https://webapi.rednote.com',
+        'login': 'https://www.rednote.com',
+        'security': 'https://as.rednote.com',
+        'captcha': 'https://webapi.rednote.com',
+        # The Rednote browser still loads the shared SEM SDK from this host.
+        'sem': 'https://pages.xiaohongshu.com',
+    },
+)
+
+
 CREATOR_PLATFORM_CONFIG = XHSPlatformConfig(
     name='creator',
     app_id='ugc',
@@ -125,6 +142,7 @@ __all__ = [
     'AUTH_LOGIN_SOURCES',
     'XHSPlatformConfig',
     'PC_PLATFORM_CONFIG',
+    'REDNOTE_PC_PLATFORM_CONFIG',
     'CREATOR_PLATFORM_CONFIG',
     'XHSAuth',
 ]
